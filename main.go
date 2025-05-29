@@ -18,21 +18,44 @@ import (
 
 // 配置常量
 const (
-	targetURL      = "https://www.xxx.com"                    // 目标服务器地址
-	listenAddr     = ":4433"                                  // 代理监听端口
-	certFile       = "/etc/ca/tls.crt"                        // TLS证书路径
-	keyFile        = "/etc/ca/tls.key"                        // TLS密钥路径
-	bufferSize     = 64 * 1024 * 1024                         // 缓冲区大小(64MB)
-	logFile        = "proxy.log"                              // 日志文件路径
-	routesFilePath = "routes.json"                            // 路由配置文件路径
-	reloadInterval = 10 * time.Second                         // 配置重载间隔
+	// 基础参数
+	targetURL     = "https://www.xxx.com"              // 目标服务器地址
+	listenAddr    = ":8433"                                  // 代理监听地址
+	certFile      = "/etc/ca/tls.crt"           // TLS证书路径
+	keyFile       = "/etc/ca/tls.key" // TLS私钥路径
+	skipTLSVerify = true                                     // 是否全局跳过 TLS 证书验证
+
+	// 日志与配置路径
+	logFile        = "proxy.log"      // 日志文件路径
+	routesFilePath = "routes.json"    // 路由配置文件
+	reloadInterval = 10 * time.Second // 路由配置重载间隔
+
+	// 缓冲区设置（每线程最大内存分配）
+	bufferSize = 64 * 1024 * 1024 // 64MB 缓冲区
+
+	// HTTP客户端连接池设置
+	maxIdleConns        = 8 // 最大空闲连接数
+	maxIdleConnsPerHost = 8 // 每主机最大空闲连接数
+	maxConnsPerHost     = 8 // 每主机最大并发连接数
+
+	// HTTP 服务器超时时间配置
+	readTimeout  = 30 * time.Second  // 读取请求超时
+	writeTimeout = 600 * time.Second // 响应写入超时，长时间传输（如视频）需设置较长
+	idleTimeout  = 120 * time.Second // 空闲连接最大存活时间
+
+	// 网络连接相关超时设置
+	dialTimeout           = 30 * time.Second // 拨号超时时间
+	dialKeepAlive         = 60 * time.Second // TCP KeepAlive
+	idleConnTimeout       = 90 * time.Second // 空闲连接超时
+	tlsHandshakeTimeout   = 10 * time.Second // TLS 握手超时
+	expectContinueTimeout = 1 * time.Second  // "Expect: 100-continue" 超时
 )
 
 // 固定请求头设置
 var fixedHeaders = map[string]string{
 	"Host":       "www.xxx.com",
 	"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-	"Referer":    "https://www.xxx.com",
+	"Referer":    "https://www.xxx.com/",
 }
 
 // 全局变量
@@ -140,7 +163,7 @@ func loadRoutes(logger *proxyLogger) error {
 	routes = config.Routes
 	lastMod = fileInfo.ModTime()
 
-	logger.Printf("Routing config reloaded. %d routes loaded.", len(routes))
+	logger.Printf("路由配置已重新加载，共 %d 条路由", len(routes))
 	return nil
 }
 
@@ -150,7 +173,7 @@ func startRouteReloader(logger *proxyLogger) {
 	go func() {
 		for range ticker.C {
 			if err := loadRoutes(logger); err != nil {
-				logger.Printf("Failed to reload route config: %v", err)
+				logger.Printf("路由配置重载失败: %v", err)
 			}
 		}
 	}()
@@ -183,22 +206,22 @@ func main() {
 	// 初始化日志系统
 	logger, err := newProxyLogger(logFile)
 	if err != nil {
-		log.Fatalf("Failed to create log file: %v", err)
+		log.Fatalf("无法创建日志文件: %v", err)
 	}
 	defer logger.Close()
 
 	// 初始加载路由配置
 	if err := loadRoutes(logger); err != nil {
-		logger.Printf("Initial route config failed: %v", err)
-		log.Fatalf("Initial route config failed: %v", err)
+		logger.Printf("初始路由配置加载失败: %v", err)
+		log.Fatalf("初始路由配置加载失败: %v", err)
 	}
 	startRouteReloader(logger) // 启动定期重载
 
 	// 解析目标URL
 	target, err := url.Parse(targetURL)
 	if err != nil {
-		logger.Printf("Failed to parse URL: %v", err)
-		log.Fatalf("Failed to parse URL: %v", err)
+		logger.Printf("URL解析失败: %v", err)
+		log.Fatalf("URL解析失败: %v", err)
 	}
 
 	// 创建反向代理实例
@@ -208,21 +231,21 @@ func main() {
 	// 配置传输层参数
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 60 * time.Second,
+			Timeout:   dialTimeout,   // 拨号超时
+			KeepAlive: dialKeepAlive, // TCP KeepAlive
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          500,
-		MaxIdleConnsPerHost:   100,
-		MaxConnsPerHost:       200,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+		MaxIdleConns:          maxIdleConns,          // 最大空闲连接数
+		MaxIdleConnsPerHost:   maxIdleConnsPerHost,   // 每主机最大空闲连接数
+		MaxConnsPerHost:       maxConnsPerHost,       // 每主机最大连接数
+		IdleConnTimeout:       idleConnTimeout,       // 空闲连接超时
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,   // TLS 握手超时
+		ExpectContinueTimeout: expectContinueTimeout, // “Expect: 100-continue” 超时
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: skipTLSVerify,    // 证书验证
+			MinVersion:         tls.VersionTLS12, // 最低 TLS 版本
 		},
-		DisableCompression: true,
+		DisableCompression: true, // 禁用压缩
 	}
 
 	// 配置代理请求处理
@@ -230,7 +253,8 @@ func main() {
 		// 查找路由映射
 		mappedPath, remainingPath, exists := findRoute(req.URL.Path)
 		if !exists {
-			return // 不修改请求，后续会返回404
+			req.Header.Set("X-Proxy-Invalid", "1") // 标记此请求为无效路由
+			return
 		}
 
 		// 修改请求目标
@@ -251,7 +275,7 @@ func main() {
 		req.Header.Del("Accept-Encoding")
 		req.Header.Del("If-Modified-Since")
 
-		logger.Printf("Forwarding: %s => %s", req.URL.Path, newPath)
+		logger.Printf("请求转发: %s => %s", req.URL.Path, newPath)
 	}
 
 	proxy.Transport = transport
@@ -267,7 +291,7 @@ func main() {
 			if !isChunked(resp.TransferEncoding) {
 				resp.Header.Del("Content-Length")
 				resp.TransferEncoding = []string{"chunked"}
-				logger.Printf("Enable chunked: %s (type: %s, size: %.2fMB)",
+				logger.Printf("大文件启用分块: %s (类型: %s, 大小: %.2fMB)",
 					resp.Request.URL.Path,
 					contentType,
 					float64(resp.ContentLength)/(1024*1024))
@@ -277,7 +301,7 @@ func main() {
 		// 设置CORS头
 		resp.Header.Set("Access-Control-Allow-Origin", "*")
 
-		logger.Printf("Response: %s %d (%s)",
+		logger.Printf("响应状态: %s %d (%s)",
 			resp.Request.Method,
 			resp.StatusCode,
 			resp.Request.URL.Path)
@@ -288,8 +312,8 @@ func main() {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		// 唯一的路由检查点
-		if _, _, exists := findRoute(r.URL.Path); !exists {
+		// 判断 Director 设置的错误标志
+		if r.Header.Get("X-Proxy-Invalid") == "1" {
 			logger.Printf("[404] %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
 			return
@@ -297,7 +321,7 @@ func main() {
 
 		// 处理代理请求
 		proxy.ServeHTTP(w, r)
-		logger.Printf("[%s] %s %s Duration: %v",
+		logger.Printf("[%s] %s %s 用时: %v",
 			r.Method,
 			r.URL.Path,
 			r.RemoteAddr,
@@ -309,25 +333,25 @@ func main() {
 		Addr:    listenAddr,
 		Handler: handler,
 		TLSConfig: &tls.Config{
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: skipTLSVerify,
 			MinVersion:         tls.VersionTLS12,
 		},
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 600 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadTimeout:  readTimeout,
+		WriteTimeout: writeTimeout,
+		IdleTimeout:  idleTimeout,
 	}
 
 	// 启动信息日志
-	logger.Printf("Proxy server started with path-based routing")
-	logger.Printf("Listening on: %s", listenAddr)
-	logger.Printf("Target server: %s", targetURL)
-	logger.Printf("Buffer size: %dMB", bufferSize/1024/1024)
-	logger.Printf("Connection pool: max %d global, %d per host", 500, 100)
-	logger.Printf("Route reload interval: %v", reloadInterval)
+	logger.Printf("启动代理服务器，已启用路径前缀路由映射功能")
+	logger.Printf("监听地址: %s", listenAddr)
+	logger.Printf("目标地址: %s", targetURL)
+	logger.Printf("缓冲区大小: %dMB", bufferSize/1024/1024)
+	logger.Printf("连接池: 全局 %d, 每主机空闲 %d, 最大并发 %d", maxIdleConns, maxIdleConnsPerHost, maxConnsPerHost)
+	logger.Printf("路由配置重载间隔: %v", reloadInterval)
 
 	// 启动服务器
 	if err := server.ListenAndServeTLS(certFile, keyFile); err != nil {
-		logger.Printf("Server failed to start: %v", err)
-		log.Fatalf("Server failed to start: %v", err)
+		logger.Printf("服务器启动失败: %v", err)
+		log.Fatalf("服务器启动失败: %v", err)
 	}
 }
