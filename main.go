@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -20,9 +21,9 @@ import (
 const (
 	// 基础参数
 	targetURL     = "https://www.xxx.com"              // 目标服务器地址
-	listenAddr    = ":8433"                                  // 代理监听地址
+	listenAddr    = ":8443"                                  // 代理监听地址
 	certFile      = "/etc/ca/tls.crt"           // TLS证书路径
-	keyFile       = "/etc/ca/tls.key" // TLS私钥路径
+	keyFile       = "/etc/ca/tls.key"           // TLS私钥路径
 	skipTLSVerify = true                                     // 是否全局跳过 TLS 证书验证
 
 	// 日志与配置路径
@@ -31,7 +32,8 @@ const (
 	reloadInterval = 10 * time.Second // 路由配置重载间隔
 
 	// 缓冲区设置（每线程最大内存分配）
-	bufferSize = 64 * 1024 * 1024 // 64MB 缓冲区
+	bufferSize        = 8 * 1024 * 1024  // 8MB 缓冲区
+	bufferIdleTimeout = 30 * time.Second // 缓冲池空闲超时时间
 
 	// HTTP客户端连接池设置
 	maxIdleConns        = 8 // 最大空闲连接数
@@ -55,7 +57,7 @@ const (
 var fixedHeaders = map[string]string{
 	"Host":       "www.xxx.com",
 	"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-	"Referer":    "https://www.xxx.com/",
+	"Referer":    "https://www.xxx.com",
 }
 
 // 全局变量
@@ -65,31 +67,83 @@ var (
 	lastMod    time.Time         // 配置文件最后修改时间
 )
 
-// bufferPool 实现内存缓冲池
+// bufferPool 实现带空闲超时的内存缓冲池
 type bufferPool struct {
-	pool sync.Pool
+	pool      sync.Pool
+	size      int
+	idleTimer *time.Timer
+	mu        sync.Mutex
+	active    int // 当前活跃的缓冲区数量
 }
 
 // newBufferPool 创建指定大小的缓冲池
-func newBufferPool(size int) *bufferPool {
-	return &bufferPool{
+func newBufferPool(size int, idleTimeout time.Duration) *bufferPool {
+	bp := &bufferPool{
+		size: size,
 		pool: sync.Pool{
 			New: func() interface{} {
 				return make([]byte, size)
 			},
 		},
 	}
+
+	// 初始化空闲计时器
+	bp.idleTimer = time.AfterFunc(idleTimeout, bp.cleanup)
+	bp.idleTimer.Stop() // 初始时不启动，等待第一次使用
+
+	return bp
 }
 
 // Get 从缓冲池获取一个缓冲块
 func (b *bufferPool) Get() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// 重置空闲计时器
+	if b.idleTimer != nil {
+		b.idleTimer.Stop()
+	}
+
+	b.active++
 	return b.pool.Get().([]byte)
 }
 
 // Put 将缓冲块归还到缓冲池
 func (b *bufferPool) Put(buf []byte) {
-	if cap(buf) >= bufferSize {
-		b.pool.Put(buf[:bufferSize])
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// 只回收正确大小的缓冲区
+	if cap(buf) == b.size {
+		buf = buf[:b.size]
+		b.pool.Put(buf)
+	}
+
+	b.active--
+
+	// 如果没有活跃缓冲区，启动空闲计时器
+	if b.active <= 0 && b.idleTimer != nil {
+		b.idleTimer.Reset(bufferIdleTimeout)
+	}
+}
+
+// cleanup 清理缓冲池
+func (b *bufferPool) cleanup() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// 如果仍然没有活跃缓冲区，清空缓冲池
+	if b.active <= 0 {
+		// 清空缓冲池
+		for i := 0; i < 10; i++ { // 最多尝试10次
+			buf := b.pool.Get()
+			if buf == nil {
+				break
+			}
+			// 显式释放内存
+			buf = nil
+		}
+		logger.Printf("缓冲池已清理(空闲超时)")
 	}
 }
 
@@ -202,9 +256,13 @@ func findRoute(path string) (string, string, bool) {
 	return "", "", false
 }
 
+// 全局日志记录器
+var logger *proxyLogger
+
 func main() {
 	// 初始化日志系统
-	logger, err := newProxyLogger(logFile)
+	var err error
+	logger, err = newProxyLogger(logFile)
 	if err != nil {
 		log.Fatalf("无法创建日志文件: %v", err)
 	}
@@ -226,7 +284,7 @@ func main() {
 
 	// 创建反向代理实例
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	bufPool := newBufferPool(bufferSize)
+	bufPool := newBufferPool(bufferSize, bufferIdleTimeout)
 
 	// 配置传输层参数
 	transport := &http.Transport{
@@ -240,7 +298,7 @@ func main() {
 		MaxConnsPerHost:       maxConnsPerHost,       // 每主机最大连接数
 		IdleConnTimeout:       idleConnTimeout,       // 空闲连接超时
 		TLSHandshakeTimeout:   tlsHandshakeTimeout,   // TLS 握手超时
-		ExpectContinueTimeout: expectContinueTimeout, // “Expect: 100-continue” 超时
+		ExpectContinueTimeout: expectContinueTimeout, // "Expect: 100-continue" 超时
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: skipTLSVerify,    // 证书验证
 			MinVersion:         tls.VersionTLS12, // 最低 TLS 版本
@@ -328,6 +386,21 @@ func main() {
 			time.Since(start))
 	})
 
+	// 启动内存监控
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		for range ticker.C {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			logger.Printf("内存状态: Alloc=%.2fMB, TotalAlloc=%.2fMB, Sys=%.2fMB, NumGC=%d, Goroutines=%d",
+				float64(m.Alloc)/1024/1024,
+				float64(m.TotalAlloc)/1024/1024,
+				float64(m.Sys)/1024/1024,
+				m.NumGC,
+				runtime.NumGoroutine())
+		}
+	}()
+
 	// 配置HTTP服务器
 	server := &http.Server{
 		Addr:    listenAddr,
@@ -346,6 +419,7 @@ func main() {
 	logger.Printf("监听地址: %s", listenAddr)
 	logger.Printf("目标地址: %s", targetURL)
 	logger.Printf("缓冲区大小: %dMB", bufferSize/1024/1024)
+	logger.Printf("缓冲池空闲超时: %v", bufferIdleTimeout)
 	logger.Printf("连接池: 全局 %d, 每主机空闲 %d, 最大并发 %d", maxIdleConns, maxIdleConnsPerHost, maxConnsPerHost)
 	logger.Printf("路由配置重载间隔: %v", reloadInterval)
 
