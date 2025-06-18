@@ -20,11 +20,11 @@ import (
 // 配置常量
 const (
 	// 基础参数
-	targetURL     = "https://www.xxx.com"              // 目标服务器地址
+	targetURL     = "https://www.xxx.com"                    // 目标服务器地址
 	listenAddr    = ":8443"                                  // 代理监听地址
-	certFile      = "/etc/ca/tls.crt"           // TLS证书路径
-	keyFile       = "/etc/ca/tls.key"           // TLS私钥路径
-	skipTLSVerify = true                                     // 是否全局跳过 TLS 证书验证
+	certFile      = "/etc/ca/tls.crt"                       // TLS证书路径
+	keyFile       = "/etc/ca/tls.key"                      // TLS私钥路径
+	skipTLSVerify = true                                   // 是否全局跳过 TLS 证书验证
 
 	// 日志与配置路径
 	logFile        = "proxy.log"      // 日志文件路径
@@ -32,13 +32,13 @@ const (
 	reloadInterval = 10 * time.Second // 路由配置重载间隔
 
 	// 缓冲区设置（每线程最大内存分配）
-	bufferSize        = 8 * 1024 * 1024  // 8MB 缓冲区
-	bufferIdleTimeout = 30 * time.Second // 缓冲池空闲超时时间
+	bufferSize        = 16 * 1024 * 1024 // 16MB 缓冲区
+	bufferIdleTimeout = 60 * time.Second // 缓冲池空闲超时时间
 
 	// HTTP客户端连接池设置
-	maxIdleConns        = 8 // 最大空闲连接数
-	maxIdleConnsPerHost = 8 // 每主机最大空闲连接数
-	maxConnsPerHost     = 8 // 每主机最大并发连接数
+	maxIdleConns        = 16 // 最大空闲连接数
+	maxIdleConnsPerHost = 16 // 每主机最大空闲连接数
+	maxConnsPerHost     = 16 // 每主机最大并发连接数
 
 	// HTTP 服务器超时时间配置
 	readTimeout  = 30 * time.Second  // 读取请求超时
@@ -51,13 +51,16 @@ const (
 	idleConnTimeout       = 90 * time.Second // 空闲连接超时
 	tlsHandshakeTimeout   = 10 * time.Second // TLS 握手超时
 	expectContinueTimeout = 1 * time.Second  // "Expect: 100-continue" 超时
+
+	// 监控配置
+	memoryMonitoringInterval = 300 * time.Second // 内存监控输出间隔时间
 )
 
 // 固定请求头设置
 var fixedHeaders = map[string]string{
 	"Host":       "www.xxx.com",
 	"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-	"Referer":    "https://www.xxx.com",
+	"Referer":    "https://www.xxx.com/",
 }
 
 // 全局变量
@@ -178,16 +181,6 @@ func (l *proxyLogger) Close() error {
 	return l.file.Close()
 }
 
-// isChunked 检查是否为分块传输编码
-func isChunked(encodings []string) bool {
-	for _, e := range encodings {
-		if e == "chunked" {
-			return true
-		}
-	}
-	return false
-}
-
 // loadRoutes 加载路由配置文件
 func loadRoutes(logger *proxyLogger) error {
 	fileInfo, err := os.Stat(routesFilePath)
@@ -273,6 +266,7 @@ func main() {
 		logger.Printf("初始路由配置加载失败: %v", err)
 		log.Fatalf("初始路由配置加载失败: %v", err)
 	}
+
 	startRouteReloader(logger) // 启动定期重载
 
 	// 解析目标URL
@@ -322,7 +316,6 @@ func main() {
 
 		// 拼接新路径：映射路径 + 剩余路径
 		newPath := filepath.Join("/", mappedPath, remainingPath)
-		req.URL.Path = newPath
 
 		// 设置固定请求头
 		for k, v := range fixedHeaders {
@@ -333,7 +326,10 @@ func main() {
 		req.Header.Del("Accept-Encoding")
 		req.Header.Del("If-Modified-Since")
 
-		logger.Printf("请求转发: %s => %s", req.URL.Path, newPath)
+		logger.Printf("转发路径: %s => %s", req.URL.Path, newPath)
+
+		// 输出日志后映射路径
+		req.URL.Path = newPath
 	}
 
 	proxy.Transport = transport
@@ -341,28 +337,14 @@ func main() {
 
 	// 配置响应处理
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		// 大文件分块传输处理
-		contentType := resp.Header.Get("Content-Type")
-		isVideo := contentType == "video/mp4" || contentType == "video/webm" || contentType == "application/octet-stream"
-
-		if isVideo || resp.ContentLength >= 1024*1024 {
-			if !isChunked(resp.TransferEncoding) {
-				resp.Header.Del("Content-Length")
-				resp.TransferEncoding = []string{"chunked"}
-				logger.Printf("大文件启用分块: %s (类型: %s, 大小: %.2fMB)",
-					resp.Request.URL.Path,
-					contentType,
-					float64(resp.ContentLength)/(1024*1024))
-			}
-		}
-
 		// 设置CORS头
 		resp.Header.Set("Access-Control-Allow-Origin", "*")
 
-		logger.Printf("响应状态: %s %d (%s)",
+		logger.Printf("响应处理: Method: %s Code: %d Url: (%s) Size: %.2fMB",
 			resp.Request.Method,
 			resp.StatusCode,
-			resp.Request.URL.Path)
+			resp.Request.URL.Path,
+			float64(resp.ContentLength)/(1024*1024))
 		return nil
 	}
 
@@ -379,7 +361,7 @@ func main() {
 
 		// 处理代理请求
 		proxy.ServeHTTP(w, r)
-		logger.Printf("[%s] %s %s 用时: %v",
+		logger.Printf("请求对端文件: Method: [%s] Url: %s Source Address: %s Time consuming: %v",
 			r.Method,
 			r.URL.Path,
 			r.RemoteAddr,
@@ -388,7 +370,7 @@ func main() {
 
 	// 启动内存监控
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(memoryMonitoringInterval)
 		for range ticker.C {
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
@@ -415,7 +397,7 @@ func main() {
 	}
 
 	// 启动信息日志
-	logger.Printf("启动代理服务器，已启用路径前缀路由映射功能")
+	logger.Printf("启动代理服务器...")
 	logger.Printf("监听地址: %s", listenAddr)
 	logger.Printf("目标地址: %s", targetURL)
 	logger.Printf("缓冲区大小: %dMB", bufferSize/1024/1024)
