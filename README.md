@@ -1,20 +1,17 @@
 # 高性能Go语言HTTPS视频代理服务
 
-本项目实现了一个高性能的 Go HTTPS 反向代理服务器，支持路径映射、TLS 加密、大文件分片转发、跨域控制、日志记录和动态路由加载。特别适用于视频流转发场景。
-
+本项目实现了一个高性能的 Go HTTPS 反向代理服务器，支持路径映射、TLS 加密、大文件分片转发、跨域控制、日志记录和动态路由加载。适用于视频流转发场景。
+已经测试: x86, ARM, Risc-Misp 都可以正常运行， 甚至在Mt7621路由器OpenWRT上跑过，转发效率还是很不错的。
 ---
 
 ## ✨ 功能特性
 
 - 🚀 支持 HTTPS 与 TLS 证书配置  
-- 🔁 动态路由映射，支持定时热重载（默认每 10 秒）  
+- 🔁 动态路由映射，支持定时热重载
 - 🧱 支持固定请求头注入（Host、User-Agent、Referer）  
-- 🧠 内置缓冲池，优化大文件转发性能  
-- 📦 支持 HTTP chunked 编码和视频流中转  
-- 🌍 默认开启 CORS 跨域（`Access-Control-Allow-Origin: *`）  
+- 🧠 内置缓冲池，自动内存回收，优化大文件转发性能  
 - 📄 控制台与文件日志并行输出  
 - ⚡ 优化 HTTP/2 传输与连接复用  
-
 ---
 
 ## 🗂️ 项目结构
@@ -25,9 +22,6 @@
  ├── proxy.log         # 日志文件：自动生成
  └── README.md         # 当前说明文档
 ```
-
-
-
 
 ------
 
@@ -90,10 +84,10 @@
 #### 📌 默认配置
 
 ```go
-const bufferSize = 64 * 1024 * 1024 // 64MB
+const bufferSize = 16 * 1024 * 1024 // 16MB
 ```
 
-表示每次请求会分配一个 **64MB** 的缓冲区来读写流式数据。
+表示每次请求会分配一个 **16MB** 的缓冲区来读写流式数据。
 
 ------
 
@@ -105,9 +99,9 @@ const bufferSize = 64 * 1024 * 1024 // 64MB
 
 | 并发数 | bufferSize | 总内存估算 |
 | ------ | ---------- | ---------- |
-| 1      | 64MB       | 64MB       |
-| 5      | 64MB       | 320MB      |
-| 20     | 64MB       | 1.25GB     |
+| 1      | 16MB       | 16MB       |
+| 5      | 16MB       | 80MB      |
+| 20     | 16MB       | 320GB     |
 
 ------
 
@@ -119,13 +113,7 @@ const bufferSize = 64 * 1024 * 1024 // 64MB
 
 ------
 
-#### 🧠 缓冲池原理简介
-
-- 使用 `sync.Pool` 实现内存复用，避免频繁申请/释放内存
-- 每次请求结束后自动归还缓冲区，提升 GC 效率
-- 缓冲池非固定大小，由 Go 运行时自动调节
-
-###  4️⃣启动服务
+###  启动服务
 
 ```
 go run main.go
@@ -171,7 +159,7 @@ https://localhost:4433/media/video.mp4
 ```
 MIT License
 
-Copyright (c) 2025 花亭
+Copyright (c) 2025 Huatin-Nice
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
