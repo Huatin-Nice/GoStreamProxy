@@ -22,9 +22,9 @@ const (
 	// 基础参数
 	targetURL     = "https://www.xxx.com"                    // 目标服务器地址
 	listenAddr    = ":8443"                                  // 代理监听地址
-	certFile      = "/etc/ca/tls.crt"                       // TLS证书路径
-	keyFile       = "/etc/ca/tls.key"                      // TLS私钥路径
-	skipTLSVerify = true                                   // 是否全局跳过 TLS 证书验证
+	certFile      = "/etc/ca/tls.crt"                        // TLS证书路径
+	keyFile       = "/etc/ca/tls.key"                        // TLS私钥路径
+	skipTLSVerify = true                                     // 是否全局跳过 TLS 证书验证
 
 	// 日志与配置路径
 	logFile        = "proxy.log"      // 日志文件路径
@@ -60,14 +60,15 @@ const (
 var fixedHeaders = map[string]string{
 	"Host":       "www.xxx.com",
 	"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-	"Referer":    "https://www.xxx.com/",
+	"Referer":    "https://www.xxx.com",
 }
 
 // 全局变量
 var (
-	routeMutex sync.RWMutex      // 路由映射表的读写锁
-	routes     map[string]string // 路由映射表
-	lastMod    time.Time         // 配置文件最后修改时间
+	routeMutex       sync.RWMutex      // 路由映射表的读写锁
+	routes           map[string]string // 路由映射表
+	lastMod          time.Time         // 配置文件最后修改时间
+	networkDataCount float64           // 总流量消耗计数
 )
 
 // bufferPool 实现带空闲超时的内存缓冲池
@@ -339,12 +340,14 @@ func main() {
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		// 设置CORS头
 		resp.Header.Set("Access-Control-Allow-Origin", "*")
-
+		Size := float64(resp.ContentLength) / (1024 * 1024) // 请求文件的大小
 		logger.Printf("响应处理: Method: %s Code: %d Url: (%s) Size: %.2fMB",
 			resp.Request.Method,
 			resp.StatusCode,
 			resp.Request.URL.Path,
-			float64(resp.ContentLength)/(1024*1024))
+			Size,
+		)
+		networkDataCount += Size // 网络请求数据总量计数
 		return nil
 	}
 
@@ -374,12 +377,14 @@ func main() {
 		for range ticker.C {
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
-			logger.Printf("内存状态: Alloc=%.2fMB, TotalAlloc=%.2fMB, Sys=%.2fMB, NumGC=%d, Goroutines=%d",
+			logger.Printf("内存状态: Alloc=%.2fMB, TotalAlloc=%.2fMB, Sys=%.2fMB, NumGC=%d, Goroutines=%d NetDataCount=%.2fMB",
 				float64(m.Alloc)/1024/1024,
 				float64(m.TotalAlloc)/1024/1024,
 				float64(m.Sys)/1024/1024,
 				m.NumGC,
-				runtime.NumGoroutine())
+				runtime.NumGoroutine(),
+				networkDataCount,
+			)
 		}
 	}()
 
